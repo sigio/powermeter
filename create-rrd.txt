@@ -1,0 +1,1 @@
+rrdtool create pulse.rrd --start '-1m' -s 60 DS:ppm:GAUGE:75:0:600 RRA:AVERAGE:0.8:5:51840 RRA:AVERAGE:0.5:60:26280
