@@ -1,13 +1,42 @@
 /*
- * Analog input, serial output
- * Reads an analog input pin, prints the results to the serial monitor.
+ * ATTiny85 kWh-meter-meter and DS18{B/S}20 temperature sensor master.
+ * Reads led pulse data from an LDR/Resistor (connected to kWh meter)
+ * Also has a 1-wire bus that supports up to ~7 DS18(B/S)20 temperature-sensors
+ *
+ * Calculates amount of pulses per minute and hour.
+ *
+ * (C) 2011, Mark Janssen <mark@sig-io.nl>, Sig-I/O Automatisering
+ * CC-BY-SA-3.0: http://creativecommons.org/licenses/by-nc-sa/3.0/
  */
 
-#include <OneWire.h>
+// To be used with arduino-tiny (http://code.google.com/p/arduino-tiny/downloads/)
+// Set board to: Attiny85 @ 8 Mhz - Internal oscilator, BOD disabled
+// Fuses: -U lfuse:w:0xe2:m -U hfuse:w:0xdf:m -U efuse:w:0xff:m
 
-#define ONEWIREPIN PB0
+// Pinout on Attiny85:
+//               RST  -^- VCC
+//   Serial      TX   - - SCK
+//   LDR / Pulse READ - - MISO / LED
+//               GND  - - MOSI / 1W-BUS
+
+// Comment this next line to disable all 1-Wire related functions
+// Uses the 1W library from: http://www.pjrc.com/teensy/td_libs_OneWire.html
+//#define USEWIRETEMP
+
+// For some reason these aren't defined when USEWIRETEMP is off.. just load them ourselves.
+#ifndef USEWIRETEMP
+#include "pins_arduino.h"
+#include "wiring.h"
+#include "TinyDebugSerial.h"
+#endif
+
+
 #define LEDPIN PB1
 // #define TXPIN PB3 // Can't choose this one, it's hardcoded in the library  
+
+#ifdef USEWIRETEMP
+#include <OneWire.h>
+#define ONEWIREPIN PB0
 
 // We store known ds18b20 sensor addresses here
 struct sensor {
@@ -20,29 +49,35 @@ struct sensor *head = (struct sensor *) NULL;
 struct sensor *end = (struct sensor *) NULL;
 struct sensor *cur = (struct sensor *) NULL;
 
-// DS18B20 Sensor nr1
-// sensor1[8] = { 0x28, 0x99, 0xb4, 0xa9, 0x02, 0x00, 0x00, 0x1c };
-// sensor2[8] = { 0x28, 0x3B, 0x9B, 0xa9, 0x02, 0x00, 0x00, 0xB9 };
-
-int temp;
-
 // Which pin is the 1w bus
 OneWire ds(ONEWIREPIN);
-
 byte step = 0;     // Which step in temperature-reading state machine are we
+int temp;
+#endif /* USEWIRETEMP */
 
-// To be used with arduino-tiny
-// Set board to: Attiny85 @ 8 Mhz - Internal oscilator, BOD disabled
-// Fuses: -U lfuse:w:0xe2:m -U hfuse:w:0xdf:m -U efuse:w:0xff:m
- 
+
 // DEBOUNCE time in milliseconds;
 #define DEBOUNCE 250
 
 // Sleep time between read loops
-#define SAMPLEDELAY 10
+#define SAMPLEDELAY 5
 
 // Not used anymore, but might need it in future
 #define LOOP 4294967000
+
+// Setup serial port, wait a bit, and print that we are alive.
+void setup() {
+      Serial.begin(115200);
+        delay( DEBOUNCE );
+        Serial.println("Rebooted");
+        pinMode(LEDPIN, OUTPUT );
+#ifdef USEWIRETEMP
+        head = NULL;                  // Initialize sensor-list
+        scan1w();                     // Scan for 1-wire temperature sensors
+        cur = head;                   // Begin at the beginning
+#endif /* USEWIRETEMP */
+}
+
 
 // Amount of ms per second, minute and hour;
 // #define SECONDS 1000
@@ -50,12 +85,13 @@ byte step = 0;     // Which step in temperature-reading state machine are we
 // #define HOURS 60 * MINUTES
 
 // What we consider HIGH and LOW values. This is a bit site dependant
-// For EW: 1000 / 980
+// For EW: 1005 / 990
 // For RS: ???? / ???
 
-#define HV 1000
-#define LV 900
+#define HV 1020
+#define LV 1010
 
+#ifdef USEWIRETEMP
 void printsensoraddr(byte addr[8])
 {
   byte i;
@@ -155,130 +191,6 @@ void printlist( struct sensor *ptr )
 }
 */
 
-// Setup serial port, wait a bit, and print that we are alive.
-void setup() {
-        Serial.begin(115200);
-        delay( DEBOUNCE );
-        Serial.println("Rebooted");
-        pinMode(LEDPIN, OUTPUT );
-        head = NULL;                  // Initialize sensor-list
-        scan1w();                     // Scan for 1-wire temperature sensors
-        cur = head;                   // Begin at the beginning
-}
-
-// The main loop, setup some basic variables, and loop again.
-// These could be globals, and then we could skip the loop
-// but I prefer this currently :P
-void loop()
-{
-        unsigned long ignore = 0;    // Keep debounce time here
-        unsigned long lastpulse = 0; // Millis value of last pulse;
-        unsigned long thispulse = 0; // Millis value of current pulse;
-        unsigned long thistime = 0;  // Millis value for this loop
-        unsigned long mlasttime = 0; // Millis value for last full minute
-        unsigned long hlasttime = 0; // Millis value for last full hour
-        unsigned long sensortime = 0;// Millis value for last sensorloop run
-
-        unsigned int hourcount = 0;  // Pulse count per hour        
-        unsigned int mincount = 0;   // Pulse count per minute
-        
-        const unsigned int low = LV;
-        const unsigned int high = HV;
-        
-        unsigned int value;          // Last value read
-        
-        while( 1 == 1)
-        {
-                thistime = millis(); // Get time for this loop
-                
-                if ( ( mlasttime + 60000 ) < thistime )
-                {  // A minute (or more) has passed
-                  mlasttime = thistime;
-                  Serial.print( "Pulses last minute: ");
-                  Serial.println( mincount );
-                  mincount = 0;
-                }
-                if ( ( hlasttime + 3600000 ) < hlasttime )
-                {
-                  hlasttime = thistime;
-                  Serial.print( "Pulses last hour: " );
-                  Serial.println( hourcount );
-                  hourcount = 0;
-                }
-                if ( ignore < thistime )
-                {
-                  digitalWrite( LEDPIN, LOW);
-                }
-               
-                // read the analog input into a variable:
-                // We read from pin A2 on the attiny85
-                value = analogRead(A2);
-//                Serial.println( value );
-                
-                // print the result:
-                if ( value > high ) // No pulse detected
-                {
-//                    ignore = 0;  // Reset ignore/debounce;
-//                    Serial.print( "Debug high: " );
-//                    Serial.println(value); 
-                }
-                else if( value < low )  // Do we detect a PULSE
-                {
-
-//                  Serial.print( "Debug LOW: " );
-//                  Serial.println(value); 
-
-                  if ( thistime > ignore )    // Have we passed the debounce time...
-                  {
-                    digitalWrite(LEDPIN, HIGH);
-                    lastpulse = thispulse;
-                    thispulse = millis();
-                    mincount++;    // Increment pulses seen this minute
-                    hourcount++;   // Increment pulses seen this hour
-
-                    if ( thispulse < lastpulse )
-                    {
-                      lastpulse = 0;    // In case it loops (50 days) 
-                    }
-
-                    Serial.print( "PULSE: t(" );
-                    Serial.print( thistime );
-                    Serial.print( "), value: " );
-                    Serial.print( value );
-                    Serial.print( " (" );
-                    Serial.print( mincount ) ;
-                    Serial.print( "/" );
-                    Serial.print( hourcount );
-                    Serial.println( ")" );
-                    
-                    ignore = thistime + DEBOUNCE;  // Set debounce time
-                    Serial.print( "Time since laste pulse (in ms): " );
-                    Serial.println( thispulse - lastpulse );
-                  }
-//                  else
-//                  {
-//                    Serial.println( "Still in debounce !!!!" ); 
-//                  }
-                }
-//                else
-//                {
-//                  Serial.print( "Debug middle value: " );
-//                  Serial.println( value );
-//                }
-                
-                // We ignore values between > low and < high
-                // as these are usually the rising or lowering edge
-                // and we detected these in the previous or next cycle
-
-                if (( sensortime + 1500 ) < thistime )
-                {
-                  sensorloop();
-                  sensortime = thistime;
-                }
-                
-                delay(SAMPLEDELAY);
-        }
-}
 
 void prepare1w( byte dev[8] )
 {
@@ -379,3 +291,122 @@ void sensorloop()
     return;
   }
 }
+
+#endif /* USEWIRETEMP */
+
+
+// The main loop, setup some basic variables, and loop again.
+// These could be globals, and then we could skip the loop
+// but I prefer this currently :P
+void loop()
+{
+        unsigned long ignore = 0;    // Keep debounce time here
+        unsigned long lastpulse = 0; // Millis value of last pulse;
+        unsigned long thispulse = 0; // Millis value of current pulse;
+        unsigned long thistime = 0;  // Millis value for this loop
+        unsigned long mlasttime = 0; // Millis value for last full minute
+        unsigned long hlasttime = 0; // Millis value for last full hour
+        unsigned long sensortime = 0;// Millis value for last sensorloop run
+
+        unsigned int hourcount = 0;  // Pulse count per hour        
+        unsigned int mincount = 0;   // Pulse count per minute
+        
+        const unsigned int low = LV;
+        const unsigned int high = HV;
+        
+        unsigned int value;          // Last value read
+        
+        while( 1 == 1)
+        {
+                thistime = millis(); // Get time for this loop
+                
+                if ( ( mlasttime + 60000 ) < thistime )
+                {  // A minute (or more) has passed
+                  mlasttime = thistime;
+                  Serial.print( "Pulses last minute: ");
+                  Serial.println( mincount );
+                  mincount = 0;
+                }
+                if ( ( hlasttime + 3600000 ) < hlasttime )
+                {
+                  hlasttime = thistime;
+                  Serial.print( "Pulses last hour: " );
+                  Serial.println( hourcount );
+                  hourcount = 0;
+                }
+                if ( ignore < thistime )
+                {
+                  digitalWrite( LEDPIN, LOW);
+                }
+               
+                // read the analog input into a variable:
+                // We read from pin PB4 on the attiny85
+                value = analogRead(PB4);
+//                Serial.println( value );
+                
+                // print the result:
+                if ( value > high ) // No pulse detected
+                {
+//                    ignore = 0;  // Reset ignore/debounce;
+//                    Serial.print( "Debug high: " );
+//                    Serial.println(value); 
+                }
+                else if( value < low )  // Do we detect a PULSE
+                {
+
+//                  Serial.print( "Debug LOW: " );
+//                  Serial.println(value); 
+
+                  if ( thistime > ignore )    // Have we passed the debounce time...
+                  {
+                    digitalWrite(LEDPIN, HIGH);
+                    lastpulse = thispulse;
+                    thispulse = millis();
+                    mincount++;    // Increment pulses seen this minute
+                    hourcount++;   // Increment pulses seen this hour
+
+                    if ( thispulse < lastpulse )
+                    {
+                      lastpulse = 0;    // In case it loops (50 days) 
+                    }
+
+                    Serial.print( "PULSE: t(" );
+                    Serial.print( thistime );
+                    Serial.print( "), value: " );
+                    Serial.print( value );
+                    Serial.print( " (" );
+                    Serial.print( mincount ) ;
+                    Serial.print( "/" );
+                    Serial.print( hourcount );
+                    Serial.println( ")" );
+                    
+                    ignore = thistime + DEBOUNCE;  // Set debounce time
+                    Serial.print( "T-Delta: " );
+                    Serial.println( thispulse - lastpulse );
+                  }
+//                  else
+//                  {
+//                    Serial.println( "Still in debounce !!!!" ); 
+//                  }
+                }
+//                else
+//                {
+//                  Serial.print( "DEBUG: middle value: " );
+//                  Serial.println( value );
+//                }
+                
+                // We ignore values between > low and < high
+                // as these are usually the rising or lowering edge
+                // and we detected these in the previous or next cycle
+
+#ifdef USEWIRETEMP
+                if (( sensortime + 1500 ) < thistime )
+                {
+                  sensorloop();
+                  sensortime = thistime;
+                }
+#endif /* USEWIRETEMP */    
+                delay(SAMPLEDELAY);
+        }
+}
+
